@@ -10,6 +10,11 @@ type RawKeyValuePair struct {
 	key   []byte
 	value Value
 	kind  Kind
+	// sequence is the position of the pair in its kv.Batch, starting from zero.
+	// It makes two pairs with the same key comparable: the pair with the larger
+	// sequence is the later write and must win. Without it, sorting only by key
+	// leaves the relative order of same-key pairs unspecified.
+	sequence int
 }
 
 // Key returns the key.
@@ -20,6 +25,11 @@ func (kv RawKeyValuePair) Key() []byte {
 // Value returns the value.
 func (kv RawKeyValuePair) Value() Value {
 	return kv.value
+}
+
+// Sequence returns the position of the pair in its kv.Batch.
+func (kv RawKeyValuePair) Sequence() int {
+	return kv.sequence
 }
 
 var DuplicateKeyInBatchErr = errors.New("batch already contains the key")
@@ -43,9 +53,10 @@ func (batch *Batch) Put(key, value []byte) error {
 		return DuplicateKeyInBatchErr
 	}
 	batch.pairs = append(batch.pairs, RawKeyValuePair{
-		key:   key,
-		value: NewValue(value),
-		kind:  EntryKindPut,
+		key:      key,
+		value:    NewValue(value),
+		kind:     EntryKindPut,
+		sequence: len(batch.pairs),
 	})
 	return nil
 }
@@ -53,20 +64,26 @@ func (batch *Batch) Put(key, value []byte) error {
 // Delete is modeled as an append operation. It results in another RawKeyValuePair in batch with kind as EntryKindDelete.
 func (batch *Batch) Delete(key []byte) {
 	batch.pairs = append(batch.pairs, RawKeyValuePair{
-		key:   key,
-		value: EmptyValue,
-		kind:  EntryKindDelete,
+		key:      key,
+		value:    EmptyValue,
+		kind:     EntryKindDelete,
+		sequence: len(batch.pairs),
 	})
 }
 
 // Get returns the Value for the given key if found.
+// When the key was written more than once in the Batch, the value of the last
+// write is returned, matching write-write semantics within a single transaction.
 func (batch *Batch) Get(key []byte) (Value, bool) {
+	var value Value
+	found := false
 	for _, pair := range batch.pairs {
 		if bytes.Equal(pair.key, key) {
-			return pair.value, true
+			value = pair.value
+			found = true
 		}
 	}
-	return EmptyValue, false
+	return value, found
 }
 
 // Contains returns true of the key is present in Batch.

@@ -82,6 +82,11 @@ func (transaction *Transaction) Get(key []byte) (kv.Value, bool) {
 	}
 	transaction.trackReads(key)
 	if value, ok := transaction.batch.Get(key); ok {
+		// A delete is modeled as an empty-valued write. Reading a deleted key must
+		// report not-found, the same semantics the storage-state Get provides.
+		if value.IsEmpty() {
+			return kv.EmptyValue, false
+		}
 		return value, true
 	}
 	return transaction.state.Get(versionedKey)
@@ -108,7 +113,11 @@ func (transaction *Transaction) Scan(keyRange kv.InclusiveKeyRange[kv.RawKey]) (
 		},
 		iterator.NoOperationOnCloseCallback,
 	)
-	transactionIterator, err := NewTransactionIterator(transaction, pendingWritesIteratorMergedWithStateIterator)
+	boundedMergedIterator := iterator.NewInclusiveBoundedIterator(
+		pendingWritesIteratorMergedWithStateIterator,
+		versionedKeyRange.End(),
+	)
+	transactionIterator, err := NewTransactionIterator(transaction, boundedMergedIterator)
 	if err != nil {
 		return nil, err
 	}

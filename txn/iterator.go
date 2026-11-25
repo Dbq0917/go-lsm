@@ -14,11 +14,11 @@ import (
 // 2) Tracking reads for a readwrite transaction.
 type Iterator struct {
 	transaction *Transaction
-	inner       *iterator.MergeIterator
+	inner       iterator.Iterator
 }
 
 // NewTransactionIterator creates a new instance of Iterator for transaction.
-func NewTransactionIterator(transaction *Transaction, inner *iterator.MergeIterator) (*Iterator, error) {
+func NewTransactionIterator(transaction *Transaction, inner iterator.Iterator) (*Iterator, error) {
 	transactionIterator := &Iterator{transaction: transaction, inner: inner}
 	if err := transactionIterator.ignoreDeleted(); err != nil {
 		return nil, err

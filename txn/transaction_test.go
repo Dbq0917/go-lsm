@@ -442,3 +442,112 @@ func TestReferencesToSSTableInTransactionScan(t *testing.T) {
 
 	assert.Equal(t, int64(0), ssTable.TotalReferences())
 }
+
+func TestReadwriteTransactionScanHidesAKeyThatIsPutAndThenDeletedInTheSameBatch(t *testing.T) {
+	rootPath := test_utility.SetupADirectoryWithTestName(t)
+	storageState, _ := state.NewStorageState(rootPath)
+	oracle := NewOracle(NewExecutor(storageState))
+
+	defer func() {
+		test_utility.CleanupDirectoryWithTestName(t)
+		storageState.Close()
+		oracle.Close()
+	}()
+
+	commitTimestamp := uint64(5)
+	oracle.nextTimestamp = commitTimestamp + 1
+
+	batch := kv.NewBatch()
+	_ = batch.Put([]byte("consensus"), []byte("committed"))
+	assert.Nil(t, storageState.Set(kv.NewTimestampedBatchFrom(*batch, commitTimestamp)))
+	oracle.commitTimestampMark.Finish(commitTimestamp)
+
+	transaction := NewReadwriteTransaction(oracle, storageState)
+	_ = transaction.Set([]byte("bolt"), []byte("kv"))
+	_ = transaction.Set([]byte("consensus"), []byte("pending"))
+	_ = transaction.Delete([]byte("consensus"))
+
+	iterator, _ := transaction.Scan(kv.NewInclusiveKeyRange(kv.RawKey("bolt"), kv.RawKey("etcd")))
+	defer iterator.Close()
+
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, "bolt", iterator.Key().RawString())
+	assert.Equal(t, "kv", iterator.Value().String())
+
+	_ = iterator.Next()
+	assert.False(t, iterator.IsValid())
+}
+
+func TestReadwriteTransactionGetTreatsADeletedKeyAsNotFoundEvenWhenItIsCommitted(t *testing.T) {
+	rootPath := test_utility.SetupADirectoryWithTestName(t)
+	storageState, _ := state.NewStorageState(rootPath)
+	oracle := NewOracle(NewExecutor(storageState))
+
+	defer func() {
+		test_utility.CleanupDirectoryWithTestName(t)
+		storageState.Close()
+		oracle.Close()
+	}()
+
+	commitTimestamp := uint64(5)
+	oracle.nextTimestamp = commitTimestamp + 1
+
+	batch := kv.NewBatch()
+	_ = batch.Put([]byte("consensus"), []byte("committed"))
+	assert.Nil(t, storageState.Set(kv.NewTimestampedBatchFrom(*batch, commitTimestamp)))
+	oracle.commitTimestampMark.Finish(commitTimestamp)
+
+	transaction := NewReadwriteTransaction(oracle, storageState)
+	_ = transaction.Set([]byte("consensus"), []byte("pending"))
+	_ = transaction.Delete([]byte("consensus"))
+
+	value, ok := transaction.Get([]byte("consensus"))
+	assert.False(t, ok)
+	assert.Equal(t, kv.EmptyValue, value)
+}
+
+func TestPendingWritesOfOneTransactionDoNotBleedIntoAnotherTransaction(t *testing.T) {
+	rootPath := test_utility.SetupADirectoryWithTestName(t)
+	storageState, _ := state.NewStorageState(rootPath)
+	oracle := NewOracle(NewExecutor(storageState))
+
+	defer func() {
+		test_utility.CleanupDirectoryWithTestName(t)
+		storageState.Close()
+		oracle.Close()
+	}()
+
+	commitTimestamp := uint64(5)
+	oracle.nextTimestamp = commitTimestamp + 1
+
+	committedBatch := kv.NewBatch()
+	_ = committedBatch.Put([]byte("consensus"), []byte("committed"))
+	assert.Nil(t, storageState.Set(kv.NewTimestampedBatchFrom(*committedBatch, commitTimestamp)))
+	oracle.commitTimestampMark.Finish(commitTimestamp)
+
+	// The first transaction writes "consensus" twice (put followed by delete) in its own batch.
+	firstTransaction := NewReadwriteTransaction(oracle, storageState)
+	_ = firstTransaction.Set([]byte("consensus"), []byte("pending"))
+	_ = firstTransaction.Delete([]byte("consensus"))
+
+	// A concurrent transaction must keep reading the committed value, unaffected by the pending writes.
+	secondTransaction := NewReadwriteTransaction(oracle, storageState)
+	value, ok := secondTransaction.Get([]byte("consensus"))
+	assert.True(t, ok)
+	assert.Equal(t, "committed", value.String())
+
+	iterator, _ := secondTransaction.Scan(kv.NewInclusiveKeyRange(kv.RawKey("bolt"), kv.RawKey("etcd")))
+	defer iterator.Close()
+
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, "consensus", iterator.Key().RawString())
+	assert.Equal(t, "committed", iterator.Value().String())
+
+	_ = iterator.Next()
+	assert.False(t, iterator.IsValid())
+
+	// The first transaction still sees its own delete.
+	firstValue, firstOk := firstTransaction.Get([]byte("consensus"))
+	assert.False(t, firstOk)
+	assert.Equal(t, kv.EmptyValue, firstValue)
+}

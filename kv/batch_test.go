@@ -43,6 +43,17 @@ func TestGetTheValueOfANonExistingKeyFromBatch(t *testing.T) {
 	assert.Equal(t, false, ok)
 }
 
+func TestGetReturnsTheLastWriteWhenAKeyIsPutThenDeletedInBatch(t *testing.T) {
+	batch := NewBatch()
+	_ = batch.Put([]byte("consensus"), []byte("raft"))
+	batch.Delete([]byte("consensus"))
+
+	value, ok := batch.Get([]byte("consensus"))
+	assert.Equal(t, true, ok)
+	assert.Equal(t, EmptyValue, value)
+	assert.Equal(t, true, value.IsEmpty())
+}
+
 func TestContainsTheKey(t *testing.T) {
 	batch := NewBatch()
 	_ = batch.Put([]byte("HDD"), []byte("Hard disk"))

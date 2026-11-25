@@ -217,3 +217,66 @@ func TestPendingWritesIteratorSeekToANonExistingKey(t *testing.T) {
 
 	assert.False(t, iterator.IsValid())
 }
+
+func TestPendingWritesIteratorExposesOnlyTheLatestWriteOfAKeyWhenRangeStartsAtTheKey(t *testing.T) {
+	batch := kv.NewBatch()
+	_ = batch.Put([]byte("bolt"), []byte("kv"))
+	_ = batch.Put([]byte("consensus"), []byte("raft"))
+	batch.Delete([]byte("consensus"))
+	_ = batch.Put([]byte("etcd"), []byte("bbolt"))
+
+	keyRange := kv.NewInclusiveKeyRange(
+		kv.RawKey("consensus"),
+		kv.RawKey("etcd"),
+	)
+	iterator := NewPendingWritesIterator(batch, 2, keyRange)
+
+	// The latest write of "consensus" is the delete, so it is exposed as an empty value
+	// and the earlier put is skipped.
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, kv.NewStringKeyWithTimestamp("consensus", 2), iterator.Key())
+	assert.Equal(t, kv.NewValue(nil), iterator.Value())
+
+	_ = iterator.Next()
+
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, kv.NewStringKeyWithTimestamp("etcd", 2), iterator.Key())
+	assert.Equal(t, kv.NewStringValue("bbolt"), iterator.Value())
+
+	_ = iterator.Next()
+	assert.False(t, iterator.IsValid())
+}
+
+func TestPendingWritesIteratorExposesOnlyTheLatestWriteOfAKeyWhenRangeStartsBeforeTheKey(t *testing.T) {
+	batch := kv.NewBatch()
+	_ = batch.Put([]byte("bolt"), []byte("kv"))
+	_ = batch.Put([]byte("consensus"), []byte("raft"))
+	batch.Delete([]byte("consensus"))
+	_ = batch.Put([]byte("etcd"), []byte("bbolt"))
+
+	keyRange := kv.NewInclusiveKeyRange(
+		kv.RawKey("bolt"),
+		kv.RawKey("etcd"),
+	)
+	iterator := NewPendingWritesIterator(batch, 2, keyRange)
+
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, kv.NewStringKeyWithTimestamp("bolt", 2), iterator.Key())
+	assert.Equal(t, kv.NewStringValue("kv"), iterator.Value())
+
+	_ = iterator.Next()
+
+	// "consensus" is represented only once, by its latest write (the delete).
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, kv.NewStringKeyWithTimestamp("consensus", 2), iterator.Key())
+	assert.Equal(t, kv.NewValue(nil), iterator.Value())
+
+	_ = iterator.Next()
+
+	assert.True(t, iterator.IsValid())
+	assert.Equal(t, kv.NewStringKeyWithTimestamp("etcd", 2), iterator.Key())
+	assert.Equal(t, kv.NewStringValue("bbolt"), iterator.Value())
+
+	_ = iterator.Next()
+	assert.False(t, iterator.IsValid())
+}
