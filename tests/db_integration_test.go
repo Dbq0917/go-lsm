@@ -138,13 +138,64 @@ func TestScanKeyValues2(t *testing.T) {
 	future.Wait()
 	assert.True(t, future.Status().IsOk())
 
-	keyValues, err := db.Scan(kv.NewInclusiveKeyRange(kv.RawKey("storage"), kv.RawKey("wisckey")))
+	var keyValues []go_lsm.KeyValue
+	err = db.Scan(kv.NewInclusiveKeyRange(kv.RawKey("storage"), kv.RawKey("wisckey")), func(keyValue go_lsm.KeyValue) bool {
+		keyValues = append(keyValues, keyValue)
+		return true
+	})
 
 	assert.NoError(t, err)
 	assert.Equal(t, []go_lsm.KeyValue{
 		{Key: kv.RawKey("vsr"), Value: []byte("consensus algorithm")},
 		{Key: kv.RawKey("wisckey"), Value: []byte("modified LSM")},
 	}, keyValues)
+}
+
+func TestScanWithEarlyTermination(t *testing.T) {
+	directory := test_utility.SetupADirectoryWithTestName(t)
+	storageOptions := state.StorageOptions{
+		MemTableSizeInBytes:   1 * 1024,
+		Path:                  directory,
+		MaximumMemtables:      2,
+		FlushMemtableDuration: 1 * time.Millisecond,
+		SSTableSizeInBytes:    4096,
+	}
+	db, _ := go_lsm.Open(storageOptions)
+	defer func() {
+		db.Close()
+		test_utility.CleanupDirectoryWithTestName(t)
+	}()
+
+	future, err := db.Write(func(transaction *txn.Transaction) {
+		assert.NoError(t, transaction.Set([]byte("raft"), []byte("consensus algorithm")))
+		assert.NoError(t, transaction.Set([]byte("vsr"), []byte("consensus algorithm")))
+		assert.NoError(t, transaction.Set([]byte("wisckey"), []byte("modified LSM")))
+	})
+	assert.NoError(t, err)
+
+	future.Wait()
+	assert.True(t, future.Status().IsOk())
+
+	var keyValues []go_lsm.KeyValue
+	err = db.Scan(kv.NewInclusiveKeyRange(kv.RawKey("raft"), kv.RawKey("wisckey")), func(keyValue go_lsm.KeyValue) bool {
+		keyValues = append(keyValues, keyValue)
+		return false
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, []go_lsm.KeyValue{
+		{Key: kv.RawKey("raft"), Value: []byte("consensus algorithm")},
+	}, keyValues)
+
+	//the cleanup after an early termination must allow subsequent scans to work
+	keyValues = nil
+	err = db.Scan(kv.NewInclusiveKeyRange(kv.RawKey("raft"), kv.RawKey("wisckey")), func(keyValue go_lsm.KeyValue) bool {
+		keyValues = append(keyValues, keyValue)
+		return true
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, 3, len(keyValues))
 }
 
 func TestScanAndValidateReferencesOfSSTables(t *testing.T) {
@@ -179,7 +230,11 @@ func TestScanAndValidateReferencesOfSSTables(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	assert.True(t, db.StorageState().TotalSSTablesAtLevel(0) > 0)
 
-	keyValues, err := db.Scan(kv.NewInclusiveKeyRange(kv.RawKey("raft"), kv.RawKey("wisckey")))
+	var keyValues []go_lsm.KeyValue
+	err := db.Scan(kv.NewInclusiveKeyRange(kv.RawKey("raft"), kv.RawKey("wisckey")), func(keyValue go_lsm.KeyValue) bool {
+		keyValues = append(keyValues, keyValue)
+		return true
+	})
 
 	assert.NoError(t, err)
 	assert.Equal(t, []go_lsm.KeyValue{

@@ -24,7 +24,7 @@ type Db struct {
 }
 
 // KeyValue is an abstraction which contains a key/value pair.
-// It is returned from the Scan operation.
+// It is passed to the callback of the Scan operation.
 type KeyValue struct {
 	Key   []byte
 	Value []byte
@@ -71,34 +71,39 @@ func (db *Db) Write(callback func(transaction *txn.Transaction)) (*future.Future
 	return transaction.Commit()
 }
 
-// Scan supports scan operation by taking an instance of kv.InclusiveKeyRange.
-// It returns a slice of KeyValue in increasing order, if no error occurs.
+// Scan supports scan operation by taking an instance of kv.InclusiveKeyRange and a callback.
+// It streams every KeyValue in increasing order to the callback as the underlying iterators
+// are merged, instead of materializing all the key/value pairs in memory.
+// The callback returns true to continue the scan and false to stop it early.
+// The KeyValue passed to the callback is only valid for the duration of the callback,
+// it must be copied if it needs to be retained.
+// The iterator and the transaction are always cleaned up, even if the scan is stopped early.
 // This implementation only supports kv.InclusiveKeyRange, there is no support for Open and HalfOpen ranges.
-func (db *Db) Scan(keyRange kv.InclusiveKeyRange[kv.RawKey]) ([]KeyValue, error) {
+func (db *Db) Scan(keyRange kv.InclusiveKeyRange[kv.RawKey], onKeyValue func(keyValue KeyValue) bool) error {
 	if db.stopped.Load() {
-		return nil, DbAlreadyStoppedErr
+		return DbAlreadyStoppedErr
 	}
 	transaction := txn.NewReadonlyTransaction(db.oracle, db.storageState)
 	defer db.oracle.FinishBeginTimestamp(transaction)
 
 	iterator, err := transaction.Scan(keyRange)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer iterator.Close()
 
-	var keyValuePairs []KeyValue
 	for iterator.IsValid() {
-		keyValuePairs = append(keyValuePairs, KeyValue{
+		if !onKeyValue(KeyValue{
 			Key:   iterator.Key().RawBytes(),
 			Value: iterator.Value().Bytes(),
-		})
-		err := iterator.Next()
-		if err != nil {
-			return nil, err
+		}) {
+			return nil
+		}
+		if err := iterator.Next(); err != nil {
+			return err
 		}
 	}
-	return keyValuePairs, nil
+	return nil
 }
 
 // Close closes the database.
