@@ -281,6 +281,7 @@ func (storageState *StorageState) Close() {
 	<-storageState.flushMemtableCompletionChannel
 	//Wait for ssTableCleaner to return
 	<-storageState.ssTableCleaner.Stop()
+	_ = storageState.manifest.Close()
 }
 
 // forceFlushNextImmutableMemtable flushes the next immutable memtable to level0 table.SSTable.
@@ -436,6 +437,8 @@ func (storageState *StorageState) mayBeLoadExisting(events []manifest.Event) err
 		memtableIds := make(map[uint64]struct{})
 		for _, event := range events {
 			switch event.EventType() {
+			case manifest.SnapshotEventType:
+				memtableIds = storageState.loadSnapshot(event.(*manifest.StorageStateSnapshot))
 			case manifest.MemtableCreatedEventType:
 				memtableCreated := event.(*manifest.MemtableCreated)
 				memtableIds[memtableCreated.MemtableId] = struct{}{}
@@ -488,6 +491,41 @@ func (storageState *StorageState) mayBeLoadExisting(events []manifest.Event) err
 	return nil
 }
 
+// loadSnapshot replaces the recoverable structural state with the state represented by the snapshot.
+func (storageState *StorageState) loadSnapshot(snapshot *manifest.StorageStateSnapshot) map[uint64]struct{} {
+	storageState.ssTables = make(map[uint64]*table.SSTable)
+	storageState.l0SSTableIds = append([]uint64(nil), snapshot.L0SSTableIds...)
+
+	numberOfLevels := len(storageState.levels)
+	if len(snapshot.Levels) > numberOfLevels {
+		numberOfLevels = len(snapshot.Levels)
+	}
+	levels := make([]*Level, numberOfLevels)
+	for level := 0; level < numberOfLevels; level++ {
+		levels[level] = &Level{LevelNumber: level + 1}
+		if level < len(snapshot.Levels) {
+			levels[level].SSTableIds = append([]uint64(nil), snapshot.Levels[level]...)
+		}
+	}
+	storageState.levels = levels
+
+	memtableIds := make(map[uint64]struct{}, len(snapshot.MemtableIds))
+	for _, memtableId := range snapshot.MemtableIds {
+		memtableIds[memtableId] = struct{}{}
+		storageState.idGenerator.setIdIfGreaterThanExisting(memtableId)
+	}
+	for _, ssTableId := range snapshot.L0SSTableIds {
+		storageState.idGenerator.setIdIfGreaterThanExisting(ssTableId)
+	}
+	for _, level := range snapshot.Levels {
+		for _, ssTableId := range level {
+			storageState.idGenerator.setIdIfGreaterThanExisting(ssTableId)
+		}
+	}
+	storageState.idGenerator.setIdIfGreaterThanExisting(snapshot.MaxId)
+	return memtableIds
+}
+
 // recoverMemtables recovers all the immutable memtables identified by memtableIds from WAL.
 func (storageState *StorageState) recoverMemtables(memtableIds map[uint64]struct{}) error {
 	var immutableMemtables []*memory.Memtable
@@ -515,7 +553,7 @@ func (storageState *StorageState) recoverMemtables(memtableIds map[uint64]struct
 	return nil
 }
 
-// recoverL0SSTables recovers all the level0 SSTables.
+// recoverL0SSTables recovers all the live SSTables at level0 and other levels.
 // Loading an instance of table.SSTable is all about creating an in-memory representation of table.SSTable with a pointer to the
 // actual file which contains the data.
 func (storageState *StorageState) recoverL0SSTables() error {
@@ -525,6 +563,18 @@ func (storageState *StorageState) recoverL0SSTables() error {
 			return err
 		}
 		storageState.ssTables[ssTable.Id()] = ssTable
+	}
+	for _, level := range storageState.levels {
+		for _, ssTableId := range level.SSTableIds {
+			if _, loaded := storageState.ssTables[ssTableId]; loaded {
+				continue
+			}
+			ssTable, err := table.Load(ssTableId, storageState.options.Path, block.DefaultBlockSize)
+			if err != nil {
+				return err
+			}
+			storageState.ssTables[ssTable.Id()] = ssTable
+		}
 	}
 	return nil
 }

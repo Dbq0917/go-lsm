@@ -110,3 +110,47 @@ func TestDecodeNewMemtableCreatedAndCompactionDoneEvents(t *testing.T) {
 	assert.Equal(t, uint64(10), events[0].(*MemtableCreated).MemtableId)
 	assert.Equal(t, []uint64{10, 11}, events[1].(*CompactionDone).NewSSTableIds)
 }
+
+func TestNewStorageStateSnapshotEventEncodeAndDecode(t *testing.T) {
+	snapshot := NewStorageStateSnapshot(
+		[]uint64{20, 21},
+		[]uint64{10, 11},
+		[][]uint64{nil, {12, 13}},
+		21,
+	)
+	buffer, err := snapshot.encode()
+	assert.Nil(t, err)
+
+	decoded, decodedSize := decodeStorageStateSnapshot(buffer[1:])
+	assert.Equal(t, len(buffer)-1, decodedSize)
+	assert.Equal(t, []uint64{20, 21}, decoded.MemtableIds)
+	assert.Equal(t, []uint64{10, 11}, decoded.L0SSTableIds)
+	assert.Equal(t, [][]uint64{nil, {12, 13}}, decoded.Levels)
+	assert.Equal(t, uint64(21), decoded.MaxId)
+}
+
+func TestDecodeEventsStopsAtATruncatedEvent(t *testing.T) {
+	memtableCreated := NewMemtableCreated(10)
+	memtableCreatedBuffer, _ := memtableCreated.encode()
+
+	events, validLength := decodeEventsFromWithValidLength(
+		append(memtableCreatedBuffer, MemtableCreatedEventType, 1, 2),
+	)
+	assert.Equal(t, 1, len(events))
+	assert.Equal(t, len(memtableCreatedBuffer), validLength)
+}
+
+func TestDecodeEventsAfterACompactionDoneEvent(t *testing.T) {
+	compactionDone := NewCompactionDone([]uint64{10}, meta.SimpleLeveledCompactionDescription{
+		UpperLevel:           -1,
+		LowerLevel:           1,
+		UpperLevelSSTableIds: []uint64{1},
+	})
+	compactionDoneBuffer, _ := compactionDone.encode()
+	memtableCreatedBuffer, _ := NewMemtableCreated(11).encode()
+
+	events := decodeEventsFrom(append(compactionDoneBuffer, memtableCreatedBuffer...))
+	assert.Equal(t, 2, len(events))
+	assert.Equal(t, uint64(10), events[0].(*CompactionDone).NewSSTableIds[0])
+	assert.Equal(t, uint64(11), events[1].(*MemtableCreated).MemtableId)
+}

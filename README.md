@@ -33,7 +33,7 @@ The implementation in this repository writes every key/value pair from the batch
     
     Check [recovery of Memtable from WAL](https://github.com/SarthakMakhija/go-lsm/blob/main/log/wal.go#L41).
    
-4. **Manifest** records different events in the system. This implementation supports `MemtableCreatedEventType`, `SSTableFlushedEventType` and `CompactionDoneEventType` event types. This concept is used in recovering the state of the
+4. **Manifest** records different events in the system. This implementation supports `MemtableCreatedEventType`, `SSTableFlushedEventType`, `CompactionDoneEventType` and `SnapshotEventType` event types. The manifest is periodically compacted into a single snapshot of the current state. The snapshot is written to a temporary file and atomically renamed, so recovery sees either the complete old manifest or the complete new one. This concept is used in recovering the state of the
 LSM ([StorageState](https://github.com/SarthakMakhija/go-lsm/blob/main/state/storage_state.go)) when it restarts. Check [Manifest](https://github.com/SarthakMakhija/go-lsm/blob/main/manifest/manifest.go).
 
 5. **SSTable** stands for sorted string table. It is the on-disk representation of the data. An [SSTable](https://github.com/SarthakMakhija/go-lsm/blob/main/table/table.go) contains the data sorted by key. SSTables can be created by flushing an immutable Memtable or by merging SSTables (/compaction). An SSTable needs to be encoded, the encoding of SSTable in this repository is available [here](https://github.com/SarthakMakhija/go-lsm/blob/main/table/builder.go#L70). Check [SSTable](https://github.com/SarthakMakhija/go-lsm/blob/main/table/table.go).

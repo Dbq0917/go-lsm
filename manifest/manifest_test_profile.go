@@ -7,5 +7,5 @@ import "os"
 // Delete deletes Manifest file, only for testing.
 func (manifest *Manifest) Delete() {
 	_ = manifest.file.Close()
-	_ = os.Remove(manifest.file.Name())
+	_ = os.Remove(manifest.path)
 }
